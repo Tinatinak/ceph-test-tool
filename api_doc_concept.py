@@ -1,92 +1,104 @@
+# -*- coding: utf-8 -*-
 """ 
 This file only intends to be used to try out solutions for generating documentation from code. 
 To see resulting Swagger UI page, paste outcome from _gen_spec() in https://editor.swagger.io/ 
 """
+""" NEWS:
+Respons code as int (or str)
+Changes in _gen_tags
+Naming: EndpointDoc, GroupDoc, group instead of tag (only in decorator), _gen_responses
+        type_to_string, doc_info (+ not private), 
+"""
 import collections
 import cherrypy
 from distutils.util import strtobool
+import inspect
 
+# TODO: Parameters should work for simple types (int, etc) and dict (see _gen_body_param)
+# TODO: Add return-values (not the same as responses!)
+# TODO: (Make sure it works with other decorators (e.g. ApiController, Endpoint))
+# TODO: (Add more parameter types in later versions: [int], {[int]}, etc.)
 #-----------------in __init__----------------------
        
-def ApiDoc(descr="(No description available)", tag=None, param=None, respons=None):
-    # TODO: Allowed values for parameter type are: array, boolean, integer, number, object, string
-    # I still haven't made it fit Open Api Spec for parameters of type dict (as for second_endpoint)
-    def _gen_param_info(param_name, param_info):
-        return {
-            'param_name': param_name,
-            'param_type': param_info[0],
-            'param_descr': param_info[1],
-        }
-    parameters = []
+def EndpointDoc(descr="", group="", param={}, respons={}):
+    parameter_list = []
     for param_name, param_info in param.items():
-        if type(param_info) == dict:
-            parameters.append({
+        if isinstance(param_info, tuple):
+            parameter_list.append({
                 'param_name': param_name,
-                'param_type': dict,
-                'param_descr': "",
-                'properties': [_gen_param_info(p_name, p_info) for p_name, p_info in param_info.items()]
+                'param_type': param_info[0],
+                'param_descr': param_info[1],
             })
         else:
-            parameters.append(_gen_param_info(param_name, param_info))
-            
+            parameter_list.append({
+                'param_name': param_name,
+                'param_type': None,
+                'param_descr': "(No description available)",
+                'properties': param_info
+            })
+
+    for key in respons.keys():
+        if isinstance(key, int):
+            respons[str(key)] = respons.pop(key)
+
     def _wrapper(func):
-        func._info_attr = {
+        func.doc_info = {
             'summary': descr,
-            'tag': tag,
-            'parameters': parameters,
+            'tag': group,
+            'parameters': parameter_list,
             'respons': respons
         }
         return func
 
     return _wrapper
 
-class ClassApiDoc(object):
-    def __init__(self, tag=None, descr=None):
-        self.tag = tag
+class GroupDoc(object):
+    def __init__(self, group="", descr=""):
+        self.tag = group
         self.tag_descr = descr
     
     def __call__(self, cls):
-        cls._info_attr = {
+        cls.doc_info = {
             'tag': self.tag,
             'tag_descr': self.tag_descr
         }
         return cls
 
 #-----------------at endpoints----------------------
-@ClassApiDoc(descr = "This is a dummy controller")
+@GroupDoc(descr = "This is a dummy controller")
 class MyController():
-    @ApiDoc(
+    @EndpointDoc(
         descr = "This is a dummy endpoint",
         param = {
             'my_num': (int, "A number of your choice"),
             'my_string': (str, "A dummy message") 
         },
         respons = {
-            '200': "OK", # TODO: Make it possible to write respons code as int. Neccessary?
+            200: "OK",
             '404': "Page not found"
-        },
-        )
+        }
+    )
     def first_endpoint(self, my_num, my_string):
         print(my_string)
         return my_num   
 
 class MySecondController():
-    @ApiDoc(
+    @EndpointDoc(
         descr = "This is a second dummy endpoint",
+        respons = {
+            401: "Not the default message" 
+        },
         param = {
             'user': {
                 'username': (str, 'desc'),
                 'pass': (str, 'desc')
             }
         },
-        respons = {
-            '401': "Not the default message" 
-        },
-        tag = "MyController"
-        )
+        group = "MyController"
+    )
     def second_endpoint(self, user):
         print("2nd endpoint")
-        return None   
+        return None
 
     def third_endpoint(self):
         print("3rd endpoint")
@@ -109,53 +121,50 @@ ENDPOINT_MAP["/" + third_endpoint.__name__].append(third_endpoint)
 
 
 #-----------------in docs.py----------------------
+@EndpointDoc()
 class Docs():
-    
-    # Reduced version. Should check is_api, etc.
-    # TODO: Assumptions correct? Add tests to verify?
-    # Assuming tag names can only correspond to controller class names. 
-    # Assuming tags can only be described once (at the class)
-    @classmethod
-    def _gen_tags(cls): 
-        tags = []
-        list_of_ctrl = set()
 
+    # Reduced version. Should check is_api, etc.
+    @classmethod
+    def _gen_tags(cls):
+        """ To generate a list of all tags in form [{name: description}] """
+        list_of_ctrl = set()
         for endpoints in ENDPOINT_MAP.values():
             for endpoint in endpoints:
                 ctrl = endpoint.im_class
                 list_of_ctrl.add(ctrl)
-        
-        for ctrl in sorted(list_of_ctrl):
+
+        tags = []        
+        for ctrl in list_of_ctrl:
             tag_name = ctrl.__name__
-            tag_descr = "(No description available)"
+            tag_descr = "*No description available*"
 
-            if hasattr(ctrl, '_info_attr'):
-                if ctrl._info_attr['tag'] is not None:
-                    tag_name = ctrl._info_attr['tag'] 
-                if ctrl._info_attr['tag_descr'] is not None:
-                    tag_descr = ctrl._info_attr['tag_descr'] 
-
+            if hasattr(ctrl, 'doc_info'):
+                if ctrl.doc_info['tag']:
+                    tag_name = ctrl.doc_info['tag'] 
+                if ctrl.doc_info['tag_descr']:
+                    tag_descr = ctrl.doc_info['tag_descr'] 
             tags.append({
                 'name': tag_name,
                 'description': tag_descr
             })
-    
+        tags.sort(key=lambda e : e['name'])
         return tags
 
     @classmethod
     def _get_tag(cls, endpoint): 
+        """ Returns the name of a tag to assign to a path """
         ctrl = endpoint.im_class
-        if hasattr(endpoint, '_info_attr') and endpoint._info_attr['tag'] is not None:
-            tag = endpoint._info_attr['tag']
-        elif hasattr(ctrl, '_info_attr') and ctrl._info_attr['tag'] is not None:
-            tag = ctrl._info_attr['tag']
-        else: # Will be endpoint.group
-            tag = ctrl.__name__
+        tag = ctrl.__name__
+        if hasattr(endpoint, 'doc_info') and endpoint.doc_info['tag']:
+            tag = endpoint.doc_info['tag']
+        elif hasattr(ctrl, 'doc_info') and ctrl.doc_info['tag']:
+            tag = ctrl.doc_info['tag']
         return tag
 
     # Reduced version. Should include all default responses.
     @classmethod
-    def _gen_responses_descr(cls, spec_respons=None):
+    def _gen_responses(cls, spec_resp={}):
         resp = {
             '400': {
                 "description": "Operation exception. Please check the "
@@ -169,22 +178,25 @@ class Docs():
                             "response body for the stack trace."
             }
         }
-        if spec_respons is not None:
-            for resp_code in spec_respons:
-                resp[resp_code] = {"description": spec_respons.get(resp_code)}
+
+        for resp_code in spec_resp:
+            resp[resp_code] = {"description": spec_resp[resp_code]}
         return resp
 
-    # Reduced version. Should include all allowed types.
-    # allowedValues in Open API spec: array, boolean, integer, number, object, string
     @classmethod
-    def _gen_type(cls, param):
-        res = ""
-        if param is str:
-            res = "string"
-        elif param is int:
-            res = "integer"
-        elif param is dict:
-            return "object"  # dict not allowed
+    def _type_to_str(cls, param_type):
+        if isinstance(param_type, str):
+            res = 'string'
+        elif isinstance(param_type, int):
+            res = 'integer'
+        elif isinstance(param_type, bool):
+            res = 'boolean'
+        elif isinstance(param_type, list):
+            res = 'array'
+        elif isinstance(param_type, float):
+            res = 'number'
+        else:
+            res = 'object'
         return res
 
     # Reduced version. Should include required or not
@@ -195,7 +207,7 @@ class Docs():
             'in': location,
             'description': param['param_descr'],
             'schema': {
-                'type': cls._gen_type(param['param_type'])
+                'type': cls._type_to_str(param['param_type'])
             }
         }
         if param.has_key('properties'):
@@ -211,20 +223,21 @@ class Docs():
 
         for path, ep in sorted(list(ENDPOINT_MAP.items())):
             endpoint = ep[0]
-
+            
             summary = "(No description available)"
-            params = [] # TODO: Make current values default. Add descr only if parameter exist. 
-            if hasattr(endpoint, '_info_attr'):
-                summary = endpoint._info_attr['summary']
-                spec_resp = endpoint._info_attr['respons']
-                for p in endpoint._info_attr['parameters']:
+            params = []
+            if hasattr(endpoint, 'doc_info'):
+                if endpoint.doc_info['summary']:
+                    summary = endpoint.doc_info['summary']
+                spec_resp = endpoint.doc_info['respons']
+                for p in endpoint.doc_info['parameters']:
                     params.append(cls._gen_param(p, "query"))
 
             methods = {
                 'get': {
                     'tags': [cls._get_tag(endpoint)],
                     'summary': summary,
-                    'responses': cls._gen_responses_descr(spec_resp),
+                    'responses': cls._gen_responses(spec_resp),
                     'parameters': params,
                 }
             }        
@@ -280,5 +293,5 @@ class Docs():
 
 
 #-----------------To test/demonstrate----------------------
-print Docs()._gen_spec() 
-
+print Docs()._gen_spec()
+#Docs()._gen_spec()
